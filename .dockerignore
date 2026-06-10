@@ -1,0 +1,28 @@
+# Virtual envs / caches
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Runtime state — these are volumes, never baked into the image
+memory/
+logs/
+sandbox/
+exports/
+data/
+voice_cache/
+voices/
+chroma_db/
+
+# Secrets
+.env
+.env.*
+*.secret
+
+# Junk / backups
+*.bak
+*.bak-*
+*.tmp
+.cli_history*
+skills/

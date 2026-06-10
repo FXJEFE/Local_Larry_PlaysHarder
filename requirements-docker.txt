@@ -1,0 +1,21 @@
+# ============================================================================
+# LARRY G-FORCE — Docker image requirements (curated, slim)
+# Covers: main.py, orchestrator, subagents/, tools/, utils/, telegram_bot.py
+# Heavy optional extras (sentence-transformers reranker, playwright, langchain)
+# are NOT installed; add them only if you need those legacy features in Docker.
+# ============================================================================
+
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# Vector memory (utils/memory_manager.py)
+chromadb>=1.0.0
+
+# Transcription (subagents/transcribe.py) — CPU int8 fallback works without CUDA
+faster-whisper>=1.0.0
+
+# Used by legacy modules imported from telegram_bot.py / agent_v2.py
+psutil>=5.9.0
+rich>=13.7.0
+pyyaml>=6.0.0
+beautifulsoup4>=4.12.0
