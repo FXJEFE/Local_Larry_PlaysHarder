@@ -1,0 +1,345 @@
+"""
+This file implements streaming functionality for the MCP client for Ollama.
+
+Classes:
+    ProgressiveMarkdownRenderer: Progressive markdown renderer.
+    StreamingManager: Handles streaming responses from Ollama.
+"""
+import shutil
+from time import monotonic
+
+from rich.live import Live
+from rich.markdown import Markdown
+from rich.text import Text
+
+from .metrics import display_metrics, extract_metrics
+
+
+class ProgressiveMarkdownRenderer:
+    """Progressive markdown renderer.
+
+    Uses Rich Live with vertical_overflow="crop" to prevent scrollback
+    corruption, and progressively commits stable content above the Live
+    zone via console.print()
+    """
+
+    REFRESH_INTERVAL = 0.15
+    VIEWPORT_COMMIT_THRESHOLD = 0.6
+
+    def __init__(self, console):
+        self.console = console
+        self.full_text = ""
+        self.committed_text = ""
+        self._live = None
+        self._last_refresh = 0.0
+
+    def start(self):
+        """Start the live rendering zone."""
+        self._live = Live(
+            Text(""),
+            console=self.console,
+            vertical_overflow="crop",
+            refresh_per_second=15,
+            transient=True,
+        )
+        self._live.start()
+        self._last_refresh = monotonic()
+
+    def update(self, new_chunk):
+        """Append a new chunk and refresh the display (throttled)."""
+        self.full_text += new_chunk
+
+        now = monotonic()
+        if now - self._last_refresh < self.REFRESH_INTERVAL:
+            return
+        self._last_refresh = now
+
+        self._maybe_commit()
+        uncommitted = self.full_text[len(self.committed_text):]
+        if uncommitted:
+            self._live.update(Markdown(uncommitted), refresh=True)
+
+    def finish(self):
+        """Commit all remaining content and cleanly stop the Live zone."""
+        if self._live is None:
+            return
+
+        # Commit whatever remains
+        remaining = self.full_text[len(self.committed_text):]
+        if remaining:
+            self._print_markdown_preserving_trailing_newlines(remaining)
+            self.committed_text = self.full_text
+
+        # Clear the live zone (transient=True will erase it) and stop
+        self._live.update(Text(""), refresh=True)
+        self._live.stop()
+        self._live = None
+
+    def _maybe_commit(self):
+        """Commit content above the Live zone if uncommitted text is tall."""
+        uncommitted = self.full_text[len(self.committed_text):]
+        if not uncommitted:
+            return
+
+        terminal_size = shutil.get_terminal_size()
+        term_lines = terminal_size.lines
+        viewport_height = max(1, term_lines - 2)  # Ensure positive value for edge cases
+        threshold = int(viewport_height * self.VIEWPORT_COMMIT_THRESHOLD)
+
+        estimated_height = self._estimate_height(uncommitted, terminal_size.columns)
+        if estimated_height <= threshold:
+            return
+
+        commit_point = self._find_safe_commit_point(uncommitted)
+        if commit_point is None:
+            return
+
+        text_to_commit = uncommitted[:commit_point]
+        self._print_markdown_preserving_trailing_newlines(text_to_commit)
+        self.committed_text += text_to_commit
+
+    def _print_markdown_preserving_trailing_newlines(self, text):
+        """Render markdown while preserving source trailing blank lines.
+
+        Rich markdown rendering may collapse trailing blank lines when content is
+        split into progressive commits. Preserve newline count explicitly so
+        spacing between committed and live content remains stable.
+        """
+        if not text:
+            return
+
+        trailing_newlines = len(text) - len(text.rstrip("\n"))
+        markdown_text = text[:-trailing_newlines] if trailing_newlines else text
+
+        if markdown_text:
+            self.console.print(Markdown(markdown_text))
+            if trailing_newlines > 1:
+                self.console.print(end="\n" * (trailing_newlines - 1))
+            return
+
+        self.console.print(end="\n" * trailing_newlines)
+
+    def _estimate_height(self, text, terminal_width):
+        """Rough estimate of how many terminal lines text will occupy."""
+        lines = 0
+        for line in text.split("\n"):
+            # Each line wraps based on terminal width (rough: ignore markup)
+            if terminal_width > 0:
+                wrapped_lines = max(1, (len(line) + terminal_width - 1) // terminal_width)
+            else:
+                wrapped_lines = 1
+            lines += wrapped_lines
+        return lines
+
+    def _find_safe_commit_point(self, text):
+        """Find the last paragraph boundary (\\n\\n) not inside a fenced code block.
+
+        Returns the index (end of the committed portion) or None if no safe point.
+        """
+        # We need at least some minimum content to commit
+        if len(text) < 20:
+            return None
+
+        # Track fenced code block state and find safe paragraph breaks
+        in_code_block = False
+        last_safe_break = None
+        pos = 0
+
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                in_code_block = not in_code_block
+
+            # Check for paragraph boundary: empty line outside code block
+            if not in_code_block and stripped == "":
+                # Include the newline in the break point
+                break_pos = pos + len(line) + 1
+                if break_pos < len(text):  # Don't commit everything
+                    last_safe_break = break_pos
+
+            pos += len(line) + 1  # Move past this line and its newline
+
+        return last_safe_break
+
+class StreamingManager:
+    """Manages streaming responses for Ollama API calls"""
+
+    VALID_ANSWER_RENDER_MODES = {"plain", "markdown", "both"}
+
+    def __init__(self, console):
+        """Initialize the streaming manager
+
+        Args:
+            console: Rich console for output
+        """
+        self.console = console
+
+    def _normalize_answer_render_mode(self, answer_render_mode):
+        """Return a supported answer rendering mode."""
+        if answer_render_mode in self.VALID_ANSWER_RENDER_MODES:
+            return answer_render_mode
+        return "both"
+
+    def _print_answer_transition_header(self, show_thinking, render_mode):
+        """Separate visible thinking output from the answer header."""
+        self.console.print()
+        if show_thinking:
+            self.console.print()
+
+        if render_mode == "markdown":
+            self.console.print(Markdown("📝 **Answer (Markdown):**"))
+        else:
+            self.console.print(Markdown("📝 **Answer:**"))
+        self.console.print(Markdown("---"))
+        self.console.print()
+
+    def _render_final_markdown_answer(self, accumulated_text):
+        """Render the completed markdown answer below the streamed output."""
+        self._print_answer_transition_header(False, "markdown")
+        self.console.print(Markdown(accumulated_text))
+        self.console.print()
+
+    async def process_streaming_response(self, stream, print_response=True, thinking_mode=False, show_thinking=True, show_metrics=False, answer_render_mode="both", cancellation_check=None):
+        """Process a streaming response from Ollama with status spinner and content updates
+
+        Args:
+            stream: Async iterator of response chunks
+            print_response: Flag to control live updating of response text
+            thinking_mode: Whether to handle thinking mode responses
+            show_thinking: Whether to keep thinking text visible in final output
+            show_metrics: Whether to display performance metrics when streaming completes
+            answer_render_mode: One of plain, markdown, or both for answer rendering
+            cancellation_check: Optional callable that returns True if processing should be cancelled
+
+        Returns:
+            str: Accumulated response text
+            list: Tool calls if any
+            dict: Metrics if captured, None otherwise
+        """
+        accumulated_text = ""
+        thinking_content = ""
+        tool_calls = []
+        metrics = None  # Store metrics from final chunk
+        render_mode = self._normalize_answer_render_mode(answer_render_mode)
+        stream_plain_text = render_mode in {"plain", "both"}
+        render_markdown = render_mode in {"markdown", "both"}
+        progressive_renderer = None
+
+        if print_response:
+            # Thinking header flag
+            thinking_started = False
+            # Show initial working spinner until first chunk arrives
+            first_chunk = True
+            self.console.print("\n[bold bright_magenta](New!)[/bold bright_magenta] [yellow]You can press 'a' to abort generation.[/yellow]\n")
+            status = self.console.status("[cyan]working...", spinner="dots")
+            status.start()
+
+
+            try:
+                async for chunk in stream:
+                    # Check for cancellation
+                    if cancellation_check and cancellation_check():
+                        self.console.print("\n[yellow]Generation aborted by user.[/yellow]")
+                        return accumulated_text, tool_calls, metrics
+
+                    # Capture metrics when chunk is done
+                    extracted_metrics = extract_metrics(chunk)
+                    if extracted_metrics:
+                        metrics = extracted_metrics
+
+                    # Handle thinking content
+                    if (thinking_mode and hasattr(chunk, 'message') and
+                        hasattr(chunk.message, 'thinking') and chunk.message.thinking):
+                        # Stop spinner on first thinking chunk ONLY if show_thinking is True
+                        if first_chunk and show_thinking:
+                            status.stop()
+                            first_chunk = False
+
+                        if not thinking_content:
+                            thinking_content = "🤔 **Thinking:**\n\n"
+                            if not thinking_started and show_thinking:
+                                self.console.print(Markdown("🤔 **Thinking:**\n"))
+                                self.console.print(Markdown("---"))
+                                self.console.print()
+                                thinking_started = True
+                        thinking_content += chunk.message.thinking
+                        # Print thinking content as plain text only if show_thinking is True
+                        if show_thinking:
+                            self.console.print(chunk.message.thinking, end="")
+
+                    # Handle regular content
+                    if (hasattr(chunk, 'message') and hasattr(chunk.message, 'content') and
+                        chunk.message.content):
+                        # Stop spinner on first content chunk (always)
+                        if first_chunk:
+                            status.stop()
+                            first_chunk = False
+
+                        # Print separator and Answer label when transitioning from thinking to content
+                        if not accumulated_text and stream_plain_text:
+                            self._print_answer_transition_header(show_thinking, "plain")
+
+                        accumulated_text += chunk.message.content
+
+                        # Print only new content as plain text (will render full markdown at end)
+                        if stream_plain_text:
+                            self.console.print(chunk.message.content, end="")
+                        elif render_mode == "markdown":
+                            if progressive_renderer is None:
+                                self._print_answer_transition_header(show_thinking, "markdown")
+                                progressive_renderer = ProgressiveMarkdownRenderer(self.console)
+                                progressive_renderer.start()
+                            progressive_renderer.update(chunk.message.content)
+
+                    # Handle tool calls
+                    if (hasattr(chunk, 'message') and hasattr(chunk.message, 'tool_calls') and
+                        chunk.message.tool_calls):
+                        # Stop spinner on first tool call chunk (always) - just in case no content arrives
+                        if first_chunk:
+                            status.stop()
+                            first_chunk = False
+
+                        for tool in chunk.message.tool_calls:
+                            tool_calls.append(tool)
+            finally:
+                if progressive_renderer is not None:
+                    progressive_renderer.finish()
+                status.stop()
+
+            # Print newline at end
+            if accumulated_text and stream_plain_text:
+                self.console.print()
+            # Render final markdown content properly (for "both" mode where progressive_renderer wasn't used)
+            if accumulated_text and render_markdown and progressive_renderer is None:
+                self._render_final_markdown_answer(accumulated_text)
+
+        else:
+            # Silent processing without display
+            async for chunk in stream:
+                # Check for cancellation
+                if cancellation_check and cancellation_check():
+                    return accumulated_text, tool_calls, metrics
+
+                # Capture metrics when chunk is done
+                extracted_metrics = extract_metrics(chunk)
+                if extracted_metrics:
+                    metrics = extracted_metrics
+
+                if (thinking_mode and hasattr(chunk, 'message') and
+                    hasattr(chunk.message, 'thinking') and chunk.message.thinking):
+                    thinking_content += chunk.message.thinking
+
+                if (hasattr(chunk, 'message') and hasattr(chunk.message, 'content') and
+                    chunk.message.content):
+                    accumulated_text += chunk.message.content
+
+                if (hasattr(chunk, 'message') and hasattr(chunk.message, 'tool_calls') and
+                    chunk.message.tool_calls):
+                    for tool in chunk.message.tool_calls:
+                        tool_calls.append(tool)
+
+        # Display metrics if requested
+        if show_metrics and metrics:
+            display_metrics(self.console, metrics)
+
+        return accumulated_text, tool_calls, metrics

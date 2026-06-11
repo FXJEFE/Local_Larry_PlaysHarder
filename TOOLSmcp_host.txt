@@ -1,0 +1,44 @@
+● End-to-end confirmed. Now the README and a memory note so future sessions know about this:
+
+● Write(~\Documents\LocalLarry\GITHUB\mcp_host\README.md)
+  ⎿  Wrote 64 lines to ..\..\Users\LocalLarry\Documents\LocalLarry\GITHUB\mcp_host\README.md
+       1 # mcp_host — Option A: Larry as a real MCP host (Ollama + qwen3:8b)
+       2
+       3 The agent loop from the architecture diagram, implemented:
+       4
+       5 ```
+       6 user prompt
+       7    ▼
+       8 MCPAgent (agent_loop.py)          ── tool-call loop ──
+       9    1. send messages + tools to Ollama /v1/chat/completions
+      10    2. if tool_calls → run via MCPHost
+     … +54 lines (ctrl+o to expand)
+
+  Read 1 file, recalled 1 memory, wrote 3 memories (ctrl+o to expand)
+
+● Done — Option A is scaffolded, debugged, and verified end-to-end.
+
+  What you have now
+
+  A new mcp_host\ package in the GITHUB repo (your legacy mcp_servers\/mcp.json are untouched — they were fake-MCP and aren't used by this):
+
+  - mcp_host\host.py — spawns real MCP servers as stdio subprocesses via the official mcp SDK, aggregates all their tools into one namespaced registry in OpenAI function format.
+  - mcp_host\agent_loop.py — the tool-call loop from your diagram: qwen3:8b via Ollama's /v1/chat/completions, executes tool_calls through the host, feeds results back, loops until a plain answer. <think> blocks are stripped from answers.
+  - mcp_host\servers.json — the three starter servers: official filesystem (sandboxed to .\sandbox), official fetch, and rag_server.py wrapping your existing ChromaDB (2,921 docs) as a real MCP server.
+  - run_mcp_agent.py — CLI: --list-tools, --once "prompt", bare for a REPL, --verbose to watch tool calls.
+
+  Verified
+
+  - All 3 servers spawn; 18 tools aggregate.
+  - Full agent run: qwen3:8b read a planted file from the sandbox — it even recovered on its own from a path error by checking allowed directories first.
+  - Full RAG run: the model chose rag__rag_search unprompted and correctly summarized real hits from your knowledge base.
+
+  The hard part (worth knowing)
+
+  rag_stats initially hung forever, and the cause was a genuine deadlock I confirmed with thread-stack dumps: importing the ML stack (sentence_transformers→sklearn→torch) from a background thread blocks permanently while __main__ is still executing. Two fixes now baked
+  into rag_server.py with comments: heavy imports happen eagerly in the main thread before the event loop starts, and sys.stdout is rerouted to stderr because huggingface_hub prints to stdout during model load — which corrupts the JSON-RPC stream (stdout is the wire in
+  stdio MCP). Slow tools also run via anyio.to_thread since FastMCP executes sync tools directly on the event loop.
+
+  Next natural step when you want it: wire MCPAgent into src\telegram_bot.py (the README shows the 4-line integration pattern), and port your other legacy native servers (kali_tools, sqlite, etc.) one at a time.
+
+✻ Baked for 1h 11m 9s

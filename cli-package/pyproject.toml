@@ -1,0 +1,27 @@
+[project]
+name = "ollmcp"
+version = "0.29.0"
+description = "CLI for MCP Client for Ollama - An easy-to-use command for interacting with Ollama through MCP"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    {name = "Jonathan Löwenstern"}
+]
+dependencies = [
+    "mcp-client-for-ollama==0.29.0"
+]
+
+[project.scripts]
+ollmcp = "ollmcp.cli:run_cli"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project.urls]
+Homepage = "https://github.com/jonigl/mcp-client-for-ollama"
+Issues = "https://github.com/jonigl/mcp-client-for-ollama/issues"
+
+[tool.setuptools]
+packages = ["ollmcp"]
